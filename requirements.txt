@@ -1,1 +1,5 @@
 fastapi[all]
+appwrite
+python-dotenv
+pandas
+numpy

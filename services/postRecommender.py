@@ -40,9 +40,15 @@ def validate_environment_vars():
 
 validate_environment_vars()
 
+
+
 async def fetch_data(collection: str, queries: Optional[List[Query]] = None) -> List[Dict]:
     """Generic method to fetch documents from any collection"""
     try:
+        # Initialize queries if not provided
+        if queries is None:
+            queries = []
+            
         result = databases.list_documents(
             os.getenv("APPWRITE_DATABASE_ID"),
             os.getenv(f"APPWRITE_{collection.upper()}_COLLECTION_ID"),
@@ -55,11 +61,17 @@ async def fetch_data(collection: str, queries: Optional[List[Query]] = None) -> 
             detail=f"Failed to fetch {collection}: {str(e)}"
         )
 
-async def get_all_data() -> Dict[str, pd.DataFrame]:
-    """Fetch all required data concurrently"""
+
+
+
+async def get_all_data(post_limit: int = 5) -> Dict[str, pd.DataFrame]:
+    """Fetch all required data concurrently with post limit"""
     try:
         posts, responses, reactions = await asyncio.gather(
-            fetch_data("post", [Query.order_desc("$createdAt")]),
+            fetch_data("post", [
+                Query.order_desc("$createdAt"),
+                Query.limit(post_limit)  # Add limit using Query
+            ]),
             fetch_data("responses"),
             fetch_data("reactions")
         )
@@ -74,6 +86,7 @@ async def get_all_data() -> Dict[str, pd.DataFrame]:
             status_code=500,
             detail=f"Data collection failed: {str(e)}"
         )
+
 
 def convert_to_dataframe(data: List[Dict]) -> pd.DataFrame:
     """Convert document list to DataFrame with error handling"""
@@ -219,52 +232,13 @@ def prepare_response_data(df: pd.DataFrame) -> pd.DataFrame:
     # Enhanced scoring formula incorporating response count
     features['composite_score'] = (
         features['counselor_responses'] * 4 +       # Counselor responses are most valuable
-        features['response_count'] * 2 +            # More responses = more engagement
+        features['response_count'] * 1.5 +            # More responses = more engagement
         features['net_reaction_score'] * 3 +        # Reactions indicate quality
-        (14 - features['post_age_days'].clip(0, 14)) * 1  # Fresher posts get slight boost
+        (10 - features['post_age_days'].clip(0, 2)) * 2  # Fresher posts get slight boost
     )
     
     print("Post ranking features with response counts:")
     print(features.head())
-    return features.sort_values('composite_score', ascending=False)
-    """Score posts with responses"""
-    df = df.copy()
-    
-    # Convert datetimes with error handling
-    datetime_cols = ['response_createdAt', 'post_createdAt']
-    for col in datetime_cols:
-        if col in df.columns:
-            df[col] = pd.to_datetime(df[col], utc=True, errors='coerce')
-            if df[col].isna().any():
-                print(f"Warning: {df[col].isna().sum()} {col} values couldn't be converted")
-    
-    # Calculate features
-    df['is_counselor'] = df['userRole'].eq('counselor').astype(int)
-    df['reaction_score'] = df['reactionType'].map({'like': 1, 'dislike': -1}).fillna(0)
-    
-    if 'post_createdAt' in df.columns:
-        df['post_age_days'] = (datetime.now(timezone.utc) - df['post_createdAt']).dt.total_seconds() / 86400
-    else:
-        df['post_age_days'] = 0  # Default value if missing
-    
-    # Aggregate and score
-    features = (
-        df.groupby('postId', observed=True)
-        .agg(
-            counselor_responses=('is_counselor', 'sum'),
-            net_reaction_score=('reaction_score', 'sum'),
-            post_age_days=('post_age_days', 'min')
-        )
-        .reset_index()
-        .dropna()
-    )
-    
-    features['composite_score'] = (
-        features['counselor_responses'] * 3 +
-        features['net_reaction_score'] * 2 +
-        (14 - features['post_age_days'].clip(0, 14)) * 1
-    )
-    print(features)
     return features.sort_values('composite_score', ascending=False)
 
 def rank_unresponded_posts(df: pd.DataFrame) -> pd.DataFrame:
@@ -281,123 +255,21 @@ def rank_unresponded_posts(df: pd.DataFrame) -> pd.DataFrame:
     df['role_priority'] = df['userRole'].map({'counselor': 2, 'student': 1}).fillna(1)
     
     df['composite_score'] = (
-        (7 - df['post_age_days'].clip(0, 7)) * 2 +
+        (10 - df['post_age_days'].clip(0, 2)) * 2 +
         df['role_priority'] * 2
     )
     # print(df)
     return df.sort_values('composite_score', ascending=False)
 
-# def mix_posts(
-#     ranked_posts: pd.DataFrame, 
-#     unresponded_posts: pd.DataFrame, 
-#     ranked_proportion: float = 0.6,
-#     shuffle: bool = False
-# ) -> List[str]:
-#     """Mix posts according to specified proportion"""
-#     if not 0 <= ranked_proportion <= 1:
-#         raise ValueError("Proportion must be between 0 and 1")
-    
-#     total = len(ranked_posts) + len(unresponded_posts)
-#     n_ranked = min(int(total * ranked_proportion), len(ranked_posts))
-#     n_unresponded = min(int(total * (1 - ranked_proportion)), len(unresponded_posts))
-    
-#     mixed = (
-#         ranked_posts['postId'].head(n_ranked).tolist() +
-#         unresponded_posts['$id'].head(n_unresponded).tolist()
-#     )
-#     print(mixed)
-    
-#     if shuffle:
-#         np.random.shuffle(mixed)
-#     return mixed
-
-
-
-# def mix_posts(
-#     ranked_posts: pd.DataFrame, 
-#     unresponded_posts: pd.DataFrame, 
-#     ranked_proportion: float = 0.6,
-#     shuffle: bool = False,
-#     min_posts: int = 203  # Added to ensure minimum output
-# ) -> List[str]:
-#     """Mix posts according to specified proportion while preserving rankings
-    
-#     Args:
-#         ranked_posts: DataFrame of posts with responses (must be pre-sorted by score)
-#         unresponded_posts: DataFrame of unresponded posts (must be pre-sorted by score)
-#         ranked_proportion: Desired proportion of ranked posts (0-1)
-#         shuffle: Whether to shuffle the final list
-#         min_posts: Minimum number of posts to return
-        
-#     Returns:
-#         List of post IDs mixed according to parameters
-#     """
-#     if not 0 <= ranked_proportion <= 1:
-#         raise ValueError("Proportion must be between 0 and 1")
-    
-#     # Ensure we have enough posts to meet minimum
-#     available_posts = len(ranked_posts) + len(unresponded_posts)
-#     if available_posts < min_posts:
-#         min_posts = available_posts
-    
-#     # Calculate numbers needed for each type
-#     n_ranked = max(1, int(min_posts * ranked_proportion))  # Ensure at least 1 ranked
-#     n_unresponded = max(1, min_posts - n_ranked)  # Ensure at least 1 unresponded
-    
-#     # Adjust if we don't have enough of one type
-#     if n_ranked > len(ranked_posts):
-#         n_ranked = len(ranked_posts)
-#         n_unresponded = min(min_posts - n_ranked, len(unresponded_posts))
-#     elif n_unresponded > len(unresponded_posts):
-#         n_unresponded = len(unresponded_posts)
-#         n_ranked = min(min_posts - n_unresponded, len(ranked_posts))
-    
-#     # Select top posts from each category (already sorted)
-#     mixed = (
-#         ranked_posts['postId'].head(n_ranked).tolist() +
-#         unresponded_posts['$id'].head(n_unresponded).tolist()
-#     )
-    
-#     print(f"Selected {n_ranked} ranked and {n_unresponded} unresponded posts")
-#     print(f"Ranked posts selected: {mixed[:n_ranked]}")
-#     print(f"Unresponded posts selected: {mixed[n_ranked:]}")
-    
-#     if shuffle:
-#         np.random.shuffle(mixed)
-#         print("Results shuffled")
-    
-#     return mixed
-
-
-
-
-
-
-# Debugging
 
 def mix_posts(
     ranked_posts: pd.DataFrame, 
     unresponded_posts: pd.DataFrame, 
     ranked_proportion: float = 0.6,
-    shuffle: bool = False,
-    min_posts: int = 50
+    shuffle: bool = True,
+    min_posts: int = 60
 ) -> List[str]:
-    """Mix posts according to specified proportion while preserving rankings
-    
-    Returns:
-        Tuple containing:
-        - List of post IDs in mixed order
-        - Dictionary with score details for debugging
 
-    Previous(debugging): def mix_posts(
-    ranked_posts: pd.DataFrame, 
-    unresponded_posts: pd.DataFrame, 
-    ranked_proportion: float = 0.6,
-    shuffle: bool = False,
-    min_posts: int = 10
-) -> Tuple[List[str], Dict[str, Dict]]:
-
-    """
     if not 0 <= ranked_proportion <= 1:
         raise ValueError("Proportion must be between 0 and 1")
     
@@ -470,3 +342,4 @@ async def get_recommended_posts() -> List[str]:
             status_code=500,
             detail=f"Recommendation generation failed: {str(e)}"
         )
+
